@@ -94,5 +94,78 @@ private void broadcast(String message) {
 <1> Using `getAsyncRemote().sendObject()` on a session you can send a message to the client
 
 
+== Vertx and event bus
+=== Allgemeines
+Für Operationen die länger dauern können(DB Zugriffe, ...) sollte man den Endpunkt asynchron
+implementieren um Rechenleistung zu sparen. Dafür wird Vertx verwendet.
+
+Mutiny ist grob gesagt ein Wrapper von Vertx, der das Reaktive Arbeiten in Quarkus vereinfacht.
+
+=== Implementierung
+
+* Extensions einfügen:
+[source]
+----
+./mvnw quarkus:add-extension -Dextensions="vertx,resteasy-mutiny"
+----
+
+* Ein Service erstellen:
+
+[source,java]
+----
+@ApplicationScoped
+public class GreetingService {
+}
+----
+
+* Einen `ManagedExecutor` mittels Dependency Injection einfügen:
+
+[source,java]
+----
+@Inject
+ManagedExecutor executor;
+----
+
+* Einen Consumer für das event `greeting` einfügen:
+
+[source,java]
+----
+@ConsumeEvent("greeting")
+public Uni<String> consume(String name) {
+    return Uni.createFrom().item(name::toUpperCase).emitOn(executor);
+}
+----
+
+* Eine Resource einfügen:
+
+[source,java]
+----
+@Path("/async")
+public class EventResource {
+}
+----
+
+* Einen EventBus mittels Dependency Injection einfügen:
+
+[source,java]
+----
+@Inject
+EventBus bus;
+----
+
+* Einen endpoint zum Behandeln des Requests mittels Event Bus einfügen:
+
+[source, java]
+----
+@GET
+@Produces(MediaType.TEXT_PLAIN)
+@Path("{name}")
+public Uni<String> greeting(@PathParam("name") String name) {
+    return bus.<String>request("greeting", name)
+            .onItem().transform(Message::body);
+}
+----
+
+
 
 
