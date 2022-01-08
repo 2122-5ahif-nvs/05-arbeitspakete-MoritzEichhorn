@@ -166,6 +166,149 @@ public Uni<String> greeting(@PathParam("name") String name) {
 }
 ----
 
+== KeyCloak und Testcontainer
+
+=== Allgemeines
+
+==== Keycloak
+Keycloak ist eine Identity und Access Management (IAM) Lösung für zahlreiche Anwendungen.
+Die Open-Source Anwendung wird von RedHat entwickelt und ermöglicht zum Beispiel
+auch Single-Sign-On.
 
 
+==== Testcontainers
+Testcontainers ist eine Java-Library welche JUnit tests unterstützt und leichtgewichtige
+Instanzen von gängigen Datenbanken, Selenium Web Browsern oder allem anderen,
+was in einem Docker-Container laufen kann, bereitstellt.
+Einsatz vor allem bei Tests, wo man eine Datenbank benötigt.
 
+=== Implementierung
+
+Extension einfügen:
+
+[source, xml]
+----
+<dependency>
+    <groupId>com.github.dasniko</groupId>
+    <artifactId>testcontainers-keycloak</artifactId>
+    <version>1.6.0</version>
+    <scope>test</scope>
+</dependency>
+----
+
+Keycloak Resource zu tests hinzufügen:
+[source, java]
+----
+public class KeycloakResource implements QuarkusTestResourceLifecycleManager {
+    KeycloakContainer keycloak;
+
+    @Override
+    public Map<String, String> start() {
+        keycloak = new KeycloakContainer()
+                .withRealmImportFile("/quarkus-realm.json"); <1>
+        keycloak.start();
+
+        return Map.of("quarkus.oidc.auth-server-url", keycloak.getAuthServerUrl() + "/realms/quarkus");
+    }
+
+    @Override
+    public void stop() {
+        if (keycloak != null) {
+            keycloak.stop();
+        }
+    }
+}
+----
+<1> Realm File muss in src/test/resources liegen.
+
+Um bei den Tests den Token einfach zu bekommen, implementiert man einen AccessTokenProvider:
+
+[source,java]
+----
+package at.htl.keycloak;
+
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
+import java.util.Map;
+
+import static io.restassured.RestAssured.given;
+
+public abstract class AccessTokenProvider {
+    @ConfigProperty(name = "quarkus.oidc.auth-server-url")
+    String authServerUrl;
+    @ConfigProperty(name = "quarkus.oidc.client-id")
+    String clientId;
+
+    protected String getAccessToken(String username, String password) {
+        return given().contentType("application/x-www-form-urlencoded")
+                .formParams(Map.of(
+                        "username", username,
+                        "password", password,
+                        "grant_type", "password",
+                        "client_id", clientId,
+                        "client_secret", "secret"
+                ))
+                .post(authServerUrl + "/protocol/openid-connect/token")
+                .then().assertThat().statusCode(200)
+                .extract().path("access_token");
+    }
+}
+
+----
+
+Nun können die Test implementiert werden:
+[source,java]
+----
+@QuarkusTest
+@QuarkusTestResource(KeycloakResource.class)<1>
+public class UsersResourceTest extends AccessTokenProvider { <2>
+
+    @Test
+    public void testMeAnonymous() {
+        given().when().get("/users/me").then().statusCode(401);
+    }
+
+    @Test
+    public void testMeSuccessfully() {
+        given()
+                .auth().oauth2(getAccessToken("john", "john"))
+                .when().get("/users/me")
+                .then()
+                .statusCode(200)
+                .body(allOf(
+                        containsString("username"),
+                        containsString("john")
+                ));
+    }
+
+    @Test
+    public void testMeAdminSuccessfully() {
+        given()
+                .auth().oauth2(getAccessToken("admin", "admin"))
+                .when().get("/users/me")
+                .then()
+                .statusCode(200)
+                .body(allOf(
+                        containsString("username"),
+                        containsString("admin")
+                ));
+    }
+
+    @Test
+    public void testInfoEndpoint() {
+        given()
+                .auth().oauth2(getAccessToken("john", "john"))
+                .when().get("/users/info")
+                .then()
+                .statusCode(200)
+                .body(allOf(
+                        containsString("email"),
+                        containsString("john@localhost")
+                ));
+    }
+}
+----
+
+<1> Testklasse mit `@QuarkusTestResource(KeycloakResource.class)` annotieren, damit
+eine Keycloak Instanz mittels Docker automatisch gestartet wird, wenn die Tests ausgeführt werden.
+<2> Nun erben wir vom AccessTokenProvider um den Token zu bekommen.
